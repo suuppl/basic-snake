@@ -1,0 +1,26 @@
+' snake.bas
+print "enter snake.bas"
+GOTO INIT
+
+MAIN:
+print "enter main"
+' PRINT "Snake3 initialized successfully"
+PRINT "W ="; W; " H ="; H
+GOSUB TEST
+END
+
+INIT:
+print "enter init"
+W = 20: H = 20: TOPB = 2: LEFTB = 10
+DIM HS(10)
+DIM HN$(10)
+DIM X(200), Y(200)
+DIM GRID(W,H)
+DEF FNX(I) = Y(I) + TOPB
+DEF FNY(I) = X(I) + LEFTB
+DEF FNGRID(I) = GRID(X(I),Y(I))
+GOTO MAIN
+
+TEST:
+PRINT "Test!"
+RETURN

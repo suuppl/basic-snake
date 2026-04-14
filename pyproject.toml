@@ -6,5 +6,6 @@ readme = "README.md"
 requires-python = ">=3.10"
 dependencies = [
     "chunk>=2.0.0",
+    "fire>=0.7.1",
     "pcbasic>=2.0.7",
 ]
