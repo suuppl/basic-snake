@@ -32,9 +32,11 @@ jobs:
           DATE=$(date -u +%Y%m%d)
 
           BASE="v0.0.${SHA}"
+          NIGHTLY="v0.0-nightly.${DATE}.${SHA}"
 
           echo "sha=$SHA" >> $GITHUB_OUTPUT
           echo "version=$BASE" >> $GITHUB_OUTPUT
+          echo "nightly=$NIGHTLY" >> $GITHUB_OUTPUT
 
       - name: Check if release exists
         env:
@@ -79,6 +81,6 @@ jobs:
             build.tar.gz \
             source.tar.gz \
             --title "Pre-release ${{ steps.version.outputs.version }}" \
-            --notes "Commit: ${{ steps.version.outputs.sha }}" \
+            --notes "Commit: ${{ steps.version.outputs.sha }}\nNightly: ${{ steps.version.outputs.nightly }}" \
             --prerelease \
             --verify-tag
