@@ -71,6 +71,16 @@ jobs:
 
           git tag -f "$VERSION"
           git push origin "$VERSION" --force
+      
+      - name: Create release notes file
+        run: |
+          cat > release-notes.md <<EOF
+          Pre-release build
+
+          Commit: ${{ steps.version.outputs.sha }}
+          Version: ${{ steps.version.outputs.version }}
+          Nightly: ${{ steps.version.outputs.nightly }}
+          EOF
 
       - name: Create GitHub release
         env:
@@ -81,6 +91,6 @@ jobs:
             build.tar.gz \
             source.tar.gz \
             --title "Pre-release ${{ steps.version.outputs.version }}" \
-            --notes "Commit: ${{ steps.version.outputs.sha }}\nNightly: ${{ steps.version.outputs.nightly }}" \
+            --notes-file release-notes.md \
             --prerelease \
             --verify-tag
