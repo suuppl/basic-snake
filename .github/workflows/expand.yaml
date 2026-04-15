@@ -34,7 +34,7 @@ jobs:
         run: |
           for dir in $PBAS_DIRS; do
             echo "Scanning directory: $dir"
-            find "$dir" -name '*.pbas' | while read pbas; do
+            find "$dir" -type f -iname '*.pbas' | while read pbas; do
               echo "Expanding: $pbas"
               python process.py expand -y "$pbas"
             done
