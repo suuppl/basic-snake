@@ -8,5 +8,7 @@ dependencies = [
     "chunk>=2.0.0",
     "click>=8.3.2",
     "fire>=0.7.1",
+    "numpy>=2.2.6",
     "pcbasic>=2.0.7",
+    "pygame>=2.6.1",
 ]
