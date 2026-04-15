@@ -1,0 +1,49 @@
+name: Build .bas from .pbas
+
+on:
+  push:
+    paths:
+      - '**.pbas'
+      - 'process.py'
+      - 'process/**'
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+env:
+  PBAS_DIRS: "test snake"
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+
+      - name: Install dependencies
+        run: pip install click
+
+      - name: Generate .bas files
+        run: |
+          for dir in $PBAS_DIRS; do
+            echo "Scanning directory: $dir"
+            find "$dir" -name '*.pbas' | while read pbas; do
+              echo "Expanding: $pbas"
+              python process.py expand -y "$pbas"
+            done
+          done
+
+      - name: Commit generated files
+        run: |
+          git config user.name  "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+          git add '*.BAS'
+          git diff --cached --quiet || git commit -m "chore: regenerate .bas from .pbas [skip ci]"
+          git push
