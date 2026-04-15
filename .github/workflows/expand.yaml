@@ -72,11 +72,14 @@ jobs:
       
       - name: Create release notes file
         run: |
+          BASE_URL="https://github.com/${{ github.repository }}"
+
           cat > release-notes.md <<EOF
           Pre-release build
 
           Commit: ${{ steps.version.outputs.sha }}
-          Version: ${{ steps.version.outputs.version }}
+          Version: [${{ steps.version.outputs.version }}](${BASE_URL}/releases/tag/${{ steps.version.outputs.version }})
+
           EOF
 
       - name: Create GitHub release
