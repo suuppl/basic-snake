@@ -1,62 +1,84 @@
-name: Build release .bas assets
+name: Build and publish pre-release
 
 on:
-  release:
-    types: [published]
   workflow_dispatch:
 
+permissions:
+  contents: write
+
 jobs:
-  build-release:
+  release:
     runs-on: ubuntu-latest
 
     steps:
-      - name: Checkout source
+      - name: Checkout (full history for tagging)
         uses: actions/checkout@v5
+        with:
+          fetch-depth: 0
 
       - name: Set up Python
         uses: actions/setup-python@v6
         with:
           python-version: '3.12'
+          cache: 'pip'
 
       - name: Install dependencies
         run: pip install click
 
-      - name: Generate .BAS files into build/
+      - name: Compute version
+        id: version
+        run: |
+          SHA=$(git rev-parse --short HEAD)
+          DATE=$(date -u +%Y%m%d)
+
+          BASE="v0.0.${SHA}"
+
+          echo "sha=$SHA" >> $GITHUB_OUTPUT
+          echo "version=$BASE" >> $GITHUB_OUTPUT
+
+      - name: Check if release exists
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+        run: |
+          if gh release view "${{ steps.version.outputs.version }}" >/dev/null 2>&1; then
+            echo "Release already exists — skipping build"
+            exit 0
+          fi
+
+      - name: Build .BAS files
         run: |
           mkdir -p build
           python process.py expand -y ./src ./build
 
-      - name: Create build archive
+      - name: Create archives
         run: |
           tar -czf build.tar.gz build
-
-      - name: Create source archive
-        run: |
           tar -czf source.tar.gz src process.py process
 
-      - name: Collect top-level BAS release assets
+      - name: Collect BAS files
         run: |
           mkdir -p release-assets
           find build -type f -iname '*.BAS' -exec cp {} release-assets/ \;
 
-      - name: Upload assets to release
-        if: github.event_name == 'release'
+      - name: Create and push tag
+        env:
+          VERSION: ${{ steps.version.outputs.version }}
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "github-actions[bot]@users.noreply.github.com"
+
+          git tag -f "$VERSION"
+          git push origin "$VERSION" --force
+
+      - name: Create GitHub release
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
-          gh release upload "${{ github.event.release.tag_name }}" \
+          gh release create "${{ steps.version.outputs.version }}" \
             release-assets/* \
             build.tar.gz \
             source.tar.gz \
-            --clobber
-
-      # Upload as workflow artifacts when manually triggered
-      - name: Upload workflow artifacts
-        if: github.event_name == 'workflow_dispatch'
-        uses: actions/upload-artifact@v4
-        with:
-          name: generated-bas-assets
-          path: |
-            release-assets/*
-            build.tar.gz
-            source.tar.gz
+            --title "Pre-release ${{ steps.version.outputs.version }}" \
+            --notes "Commit: ${{ steps.version.outputs.sha }}" \
+            --prerelease \
+            --verify-tag
