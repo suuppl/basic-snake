@@ -1,0 +1,7 @@
+'comment
+GOTO C
+END
+
+C:
+print "C"
+return
