@@ -1,0 +1,47 @@
+' snake.bas
+print "Welcome to Snake!"
+INIT:
+  CLS
+  DEFINT A-Z
+  DBG.EN = 1
+  W = 30: H = 15: TOPB = 2: LEFTB = 80\2 - W\2
+  DIM HS(10)
+  DIM HN$(10)
+  DIM X(200), Y(200)
+  DIM GRID(W,H)
+  WALL$ = CHR$(219)
+  DEF FNX(I) = Y(I) + TOPB
+  DEF FNY(I) = X(I) + LEFTB
+  DEF FNGRID(I) = GRID(X(I),Y(I))
+
+  GOSUB BORDER
+  GOTO MAIN
+
+
+MAIN:
+' print "enter main"
+  END
+
+DBG:
+  for X = 1 to W:
+    for Y = 1 to H:
+      GRID(X,Y) = 0
+      LOCATE TOPB + Y, LEFTB+X
+      PRINT using "#"; GRID(X,Y);
+    next Y
+  next X
+  return
+
+BORDER:
+  ' print "enter border"
+  for X = 0 to W + 1:
+    locate TOPB + 0, LEFTB+X: print WALL$
+    locate TOPB + H + 1, LEFTB+X: print WALL$
+  next X
+
+  for Y = 0 to H + 1:
+    locate TOPB + Y, LEFTB + 0: print WALL$
+    locate TOPB + Y, LEFTB + W + 1: print WALL$
+  next Y
+  if DBG.EN = 1 then DBG
+  return
