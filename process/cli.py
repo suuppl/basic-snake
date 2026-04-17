@@ -10,11 +10,14 @@ from .core import (
     Compiler,
     DEFAULT_STEP,
     DEFAULT_BLOCK_STEP,
+    ErrorCollector,
+)
+
+from .fs import (
     read,
     write,
     dos_name,
     find_existing_ci,
-    ErrorCollector,
 )
 
 
@@ -24,7 +27,7 @@ from .core import (
 
 def is_dir_mode(path):
     p = Path(path)
-    return p.is_dir() or p.suffix == ""
+    return p.is_dir()
 
 
 def collect_files(root, ext):
