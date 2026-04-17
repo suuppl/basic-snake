@@ -3,5 +3,5 @@ snake in gwbasic
 
 ## run
 ```
-./process.py ./src ./build && pcbasic ./build/snake.bas
+./process.py ./src ./build && pcbasic ./build/SNAKE.BAS
 ```

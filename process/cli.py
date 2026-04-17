@@ -1,10 +1,5 @@
 """
-process/cli.py — GW-BASIC label tool CLI
-
-behavior:
-    ./process.py infile outfile   -> add line numbers, resolve labels
-    ./process.py ./src ./build    -> batch expand
-
+process/cli.py — GW-BASIC label compiler CLI
 """
 
 import os
@@ -12,13 +7,14 @@ import click
 from pathlib import Path
 
 from .core import (
-    GWExpander,
+    Compiler,
     DEFAULT_STEP,
     DEFAULT_BLOCK_STEP,
     read,
     write,
     dos_name,
     find_existing_ci,
+    ErrorCollector,
 )
 
 
@@ -33,7 +29,6 @@ def is_dir_mode(path):
 
 def collect_files(root, ext):
     root = Path(root)
-    ext = ext.lower()
     return sorted(
         p for p in root.rglob("*")
         if p.is_file() and p.suffix.lower() == ext
@@ -54,10 +49,22 @@ def map_outfile(in_root, infile, out_root, new_ext):
 
 
 # =============================================================================
+# ERROR RENDERING
+# =============================================================================
+
+def print_errors(errors: ErrorCollector):
+    if not errors or not errors.errors:
+        return
+
+    for err in errors.errors:
+        click.echo(err.format(), err=True)
+
+
+# =============================================================================
 # PIPELINE
 # =============================================================================
 
-def run_batch(files, in_root, out_root, expander, dry, verbose):
+def run_batch(files, in_root, out_root, compiler, dry, verbose):
     out_root = Path(out_root)
 
     if not dry:
@@ -68,12 +75,11 @@ def run_batch(files, in_root, out_root, expander, dry, verbose):
             click.echo(f"[expand] {f}", err=True)
 
         src = read(f)
+        out, errors = compiler.run(src, str(f))
 
-        out, diags = expander.run(src, str(f))
-
-        if diags:
-            for d in diags:
-                click.echo(d.format(), err=True)
+        # MULTI ERROR HANDLING
+        if errors and errors.errors:
+            print_errors(errors)
             raise SystemExit(1)
 
         dst = map_outfile(in_root, f, out_root, ".bas")
@@ -86,15 +92,15 @@ def run_batch(files, in_root, out_root, expander, dry, verbose):
             write(dst, out)
 
 
-def run_single(infile, outfile, expander, dry, verbose):
+def run_single(infile, outfile, compiler, dry, verbose):
     infile = resolve_infile(infile)
     src = read(infile)
 
-    out, diags = expander.run(src, infile)
+    out, errors = compiler.run(src, infile)
 
-    if diags:
-        for i, d in enumerate(diags, 1):
-            click.echo(d.format(i), err=True)
+    # MULTI ERROR HANDLING
+    if errors and errors.errors:
+        print_errors(errors)
         raise SystemExit(1)
 
     if outfile is None:
@@ -117,27 +123,26 @@ def run_single(infile, outfile, expander, dry, verbose):
 
 
 # =============================================================================
-# CLI ENTRY (NO VERBS)
+# CLI ENTRY
 # =============================================================================
 
 @click.command(context_settings=dict(help_option_names=["-h", "--help"]))
 @click.argument("infile")
 @click.argument("outfile", required=False)
-@click.option("-y", "--yes", is_flag=True)
 @click.option("-n", "--dry-run", is_flag=True)
 @click.option("-v", "--verbose", is_flag=True)
 @click.option("--step", default=DEFAULT_STEP)
 @click.option("--block-step", default=DEFAULT_BLOCK_STEP)
-def cli(infile, outfile, yes, dry_run, verbose, step, block_step):
+def cli(infile, outfile, dry_run, verbose, step, block_step):
     """
-    GW-BASIC label tool (expand only)
+    GW-BASIC label tool
 
     Examples:
         ./process.py game.pbas game.bas
         ./process.py ./src ./build
     """
 
-    expander = GWExpander(step, block_step)
+    compiler = Compiler(step, block_step)
 
     # DIRECTORY MODE
     if is_dir_mode(infile):
@@ -145,12 +150,11 @@ def cli(infile, outfile, yes, dry_run, verbose, step, block_step):
             raise click.ClickException("Output directory required for batch mode")
 
         files = collect_files(infile, ".pbas")
-
-        run_batch(files, infile, outfile, expander, dry_run, verbose)
+        run_batch(files, infile, outfile, compiler, dry_run, verbose)
         return
 
     # SINGLE FILE MODE
-    run_single(infile, outfile, expander, dry_run, verbose)
+    run_single(infile, outfile, compiler, dry_run, verbose)
 
 
 if __name__ == "__main__":
