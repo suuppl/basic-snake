@@ -1,0 +1,28 @@
+x = 0
+if x = 0 then A else gosub D
+gosub B
+gosub b
+goto C
+print "50"
+print "60"
+print "70"
+print "80"
+print "90"
+print "100"
+end
+
+A:
+print "A"
+return
+
+B:
+print "B"
+return
+
+C:
+print "C"
+end
+
+' D:
+' print "D"
+' return
