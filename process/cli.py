@@ -1,8 +1,10 @@
 """
-process/cli.py — Click CLI for gwlabel / process.py
+process/cli.py — GW-BASIC label tool CLI
 
-All file resolution, dry-run, and verbosity concerns live here.
-Core processing is delegated to process.core.
+behavior:
+    ./process.py infile outfile   -> add line numbers, resolve labels
+    ./process.py ./src ./build    -> batch expand
+
 """
 
 import os
@@ -10,274 +12,146 @@ import click
 from pathlib import Path
 
 from .core import (
-    GWExpander, GWCollapser,
-    DEFAULT_STEP, DEFAULT_BLOCK_STEP,
-    read, write, dos_name, find_existing_ci,
+    GWExpander,
+    DEFAULT_STEP,
+    DEFAULT_BLOCK_STEP,
+    read,
+    write,
+    dos_name,
+    find_existing_ci,
 )
 
 
 # =============================================================================
-# FILE RESOLUTION  (DOS-style, case-insensitive)
+# HELPERS
 # =============================================================================
 
-def _is_probably_directory(path):
-    """
-    Treat as directory if:
-      - path exists and is a directory
-      - OR path has no file extension
-    """
+def is_dir_mode(path):
     p = Path(path)
     return p.is_dir() or p.suffix == ""
 
-def _collect_input_files(root, ext):
-    """
-    Recursively collect files ending in ext under root.
-    Extension match is case-insensitive.
-    """
+
+def collect_files(root, ext):
     root = Path(root)
     ext = ext.lower()
-
     return sorted(
         p for p in root.rglob("*")
         if p.is_file() and p.suffix.lower() == ext
     )
 
-def _resolve_infile(path, yes):
-    """
-    Locate infile using case-insensitive matching.
-    Prompts if the on-disk name differs from what was typed.
-    Returns the resolved path, or exits on abort/not-found.
-    """
+
+def resolve_infile(path):
     found = find_existing_ci(path)
-    if found is None:
-        click.echo(f"File not found: {path}", err=True)
-        raise SystemExit(1)
+    if not found:
+        raise click.ClickException(f"File not found: {path}")
+    return os.path.normpath(found)
 
-    actual = os.path.normpath(found)
-    requested = os.path.normpath(path)
 
-    if actual != requested and not yes:
-        if not click.confirm(f"'{requested}' not found. Use '{actual}'?", default=True):
+def map_outfile(in_root, infile, out_root, new_ext):
+    rel = Path(infile).relative_to(in_root)
+    out = Path(out_root) / rel.with_suffix(new_ext)
+    return out.parent / out.name.upper()
+
+
+# =============================================================================
+# PIPELINE
+# =============================================================================
+
+def run_batch(files, in_root, out_root, expander, dry, verbose):
+    out_root = Path(out_root)
+
+    if not dry:
+        out_root.mkdir(parents=True, exist_ok=True)
+
+    for f in files:
+        if verbose:
+            click.echo(f"[expand] {f}", err=True)
+
+        src = read(f)
+
+        out, diags = expander.run(src, str(f))
+
+        if diags:
+            for d in diags:
+                click.echo(d.format(), err=True)
             raise SystemExit(1)
 
-    return actual
+        dst = map_outfile(in_root, f, out_root, ".bas")
 
-
-def _resolve_outfile(infile, outfile, yes, dry_run, verbose):
-    """
-    Uppercase the outfile name (DOS style), handle three conflict cases:
-      1. A differently-cased variant exists  -> ask to delete and write uppercased
-      2. The exact uppercased target exists  -> ask to overwrite
-      3. The target resolves to the infile   -> ask to overwrite
-    In dry-run mode, conflict checks are skipped (nothing will be written).
-    Returns the final DOS-cased path.
-    """
-    dos = dos_name(outfile)
-
-    if dry_run:
-        if verbose:
-            click.echo(f"[dry-run] Would write to: {dos}", err=True)
-        return dos
-
-    found = find_existing_ci(outfile)
-
-    if found is not None:
-        actual = os.path.normpath(found)
-        dos_norm = os.path.normpath(dos)
-        in_norm = os.path.normpath(infile)
-
-        if actual == in_norm:
-            if not yes and not click.confirm(
-                f"Output '{dos}' is the same file as the input. Overwrite?",
-                default=False,
-            ):
-                raise SystemExit(1)
-
-        elif actual != dos_norm:
-            # e.g. NAME.bas exists on disk, we want NAME.BAS
-            if verbose:
-                click.echo(f"[conflict] '{actual}' has different casing from '{dos}'", err=True)
-            if not yes and not click.confirm(
-                f"'{actual}' exists with different casing. Delete it and save as '{dos}'?",
-                default=True,
-            ):
-                raise SystemExit(1)
-            if verbose:
-                click.echo(f"[delete] {actual}", err=True)
-            os.remove(actual)
-
+        if dry:
+            for line in out:
+                click.echo(line)
         else:
-            if not yes and not click.confirm(
-                f"'{dos}' already exists. Overwrite?",
-                default=True,
-            ):
-                raise SystemExit(1)
+            dst.parent.mkdir(parents=True, exist_ok=True)
+            write(dst, out)
 
-    return dos
+
+def run_single(infile, outfile, expander, dry, verbose):
+    infile = resolve_infile(infile)
+    src = read(infile)
+
+    out, diags = expander.run(src, infile)
+
+    if diags:
+        for i, d in enumerate(diags, 1):
+            click.echo(d.format(i), err=True)
+        raise SystemExit(1)
+
+    if outfile is None:
+        outfile = dos_name(Path(infile).with_suffix(".bas"))
+
+    dst = Path(outfile)
+
+    if verbose:
+        click.echo(f"[expand] {infile} -> {dst}", err=True)
+
+    if dry:
+        for line in out:
+            click.echo(line)
+        return
+
+    dst.parent.mkdir(parents=True, exist_ok=True)
+    write(dst, out)
+
+    click.echo(f"Expanded {infile} -> {dst}")
 
 
 # =============================================================================
-# CLI
+# CLI ENTRY (NO VERBS)
 # =============================================================================
 
-@click.group()
-def cli():
-    """GW-BASIC label tool.
-
-    Converts between labelled pseudo-BASIC (.pbas) and
-    numbered GW-BASIC (.bas). File names are always uppercased
-    on output (DOS style).
+@click.command(context_settings=dict(help_option_names=["-h", "--help"]))
+@click.argument("infile")
+@click.argument("outfile", required=False)
+@click.option("-y", "--yes", is_flag=True)
+@click.option("-n", "--dry-run", is_flag=True)
+@click.option("-v", "--verbose", is_flag=True)
+@click.option("--step", default=DEFAULT_STEP)
+@click.option("--block-step", default=DEFAULT_BLOCK_STEP)
+def cli(infile, outfile, yes, dry_run, verbose, step, block_step):
     """
-    pass
+    GW-BASIC label tool (expand only)
 
+    Examples:
+        ./process.py game.pbas game.bas
+        ./process.py ./src ./build
+    """
 
-# ── expand ────────────────────────────────────────────────────────────────────
-
-@cli.command()
-@click.argument("infile")
-@click.argument("outfile", required=False)
-@click.option("--yes",        "-y", is_flag=True,
-              help="Answer yes to all confirmation prompts.")
-@click.option("--dry-run",    "-n", is_flag=True,
-              help="Print output to stdout instead of writing a file.")
-@click.option("--verbose",    "-v", is_flag=True,
-              help="Show extra detail about what is happening.")
-@click.option("--step",       type=int, default=DEFAULT_STEP,       show_default=True,
-              help="Line-number increment within a block.")
-@click.option("--block-step", type=int, default=DEFAULT_BLOCK_STEP, show_default=True,
-              help="Line-number boundary between labelled blocks.")
-def expand(infile, outfile, yes, dry_run, verbose, step, block_step):
-    """Expand labelled pseudo-BASIC (.pbas) into numbered GW-BASIC (.bas)."""
-
-    expander = GWExpander(step=step, block_step=block_step)
+    expander = GWExpander(step, block_step)
 
     # DIRECTORY MODE
-    if os.path.isdir(infile):
-        files = _collect_input_files(infile, ".pbas")
-
+    if is_dir_mode(infile):
         if outfile is None:
-            raise click.ClickException("Output directory required when infile is a directory.")
+            raise click.ClickException("Output directory required for batch mode")
 
-        out_root = Path(outfile)
-        if not dry_run:
-            out_root.mkdir(parents=True, exist_ok=True)
+        files = collect_files(infile, ".pbas")
 
-        for srcfile in files:
-            rel = srcfile.relative_to(infile)
-            dstfile = out_root / rel.with_suffix(".bas")
-            dstfile = dstfile.parent / dstfile.name.upper()
-
-            if verbose:
-                click.echo(f"[expand] {srcfile} -> {dstfile}", err=True)
-
-            src = read(srcfile)
-            out = expander.run(src)
-
-            if dry_run:
-                for line in out:
-                    click.echo(line)
-            else:
-                dstfile.parent.mkdir(parents=True, exist_ok=True)
-                write(dstfile, out)
-
+        run_batch(files, infile, outfile, expander, dry_run, verbose)
         return
 
     # SINGLE FILE MODE
-    infile = _resolve_infile(infile, yes)
-
-    if outfile is None:
-        outfile = dos_name(os.path.splitext(infile)[0] + ".bas")
-    elif _is_probably_directory(outfile):
-        Path(outfile).mkdir(parents=True, exist_ok=True)
-        base = Path(infile).stem.upper() + ".BAS"
-        outfile = str(Path(outfile) / base)
-
-    outfile = _resolve_outfile(infile, outfile, yes, dry_run, verbose)
-
-    if verbose:
-        click.echo(f"[expand] {infile} -> {outfile}", err=True)
-
-    src = read(infile)
-    out = expander.run(src)
-
-    if dry_run:
-        for line in out:
-            click.echo(line)
-    else:
-        Path(outfile).parent.mkdir(parents=True, exist_ok=True)
-        write(outfile, out)
-        click.echo(f"Expanded {infile} -> {outfile}")
+    run_single(infile, outfile, expander, dry_run, verbose)
 
 
-# ── collapse ──────────────────────────────────────────────────────────────────
-
-@cli.command()
-@click.argument("infile")
-@click.argument("outfile", required=False)
-@click.option("--yes",     "-y", is_flag=True,
-              help="Answer yes to all confirmation prompts.")
-@click.option("--dry-run", "-n", is_flag=True,
-              help="Print output to stdout instead of writing a file.")
-@click.option("--verbose", "-v", is_flag=True,
-              help="Show extra detail about what is happening.")
-def collapse(infile, outfile, yes, dry_run, verbose):
-    """Collapse numbered GW-BASIC (.bas) into labelled pseudo-BASIC (.pbas)."""
-
-    collapser = GWCollapser()
-
-    # DIRECTORY MODE
-    if os.path.isdir(infile):
-        files = _collect_input_files(infile, ".bas")
-
-        if outfile is None:
-            raise click.ClickException("Output directory required when infile is a directory.")
-
-        out_root = Path(outfile)
-        if not dry_run:
-            out_root.mkdir(parents=True, exist_ok=True)
-
-        for srcfile in files:
-            rel = srcfile.relative_to(infile)
-            dstfile = out_root / rel.with_suffix(".pbas")
-            dstfile = dstfile.parent / dstfile.name.upper()
-
-            if verbose:
-                click.echo(f"[collapse] {srcfile} -> {dstfile}", err=True)
-
-            src = read(srcfile)
-            out = collapser.run(src)
-
-            if dry_run:
-                for line in out:
-                    click.echo(line)
-            else:
-                dstfile.parent.mkdir(parents=True, exist_ok=True)
-                write(dstfile, out)
-
-        return
-
-    # SINGLE FILE MODE
-    infile = _resolve_infile(infile, yes)
-
-    if outfile is None:
-        outfile = dos_name(os.path.splitext(infile)[0] + ".pbas")
-    elif _is_probably_directory(outfile):
-        Path(outfile).mkdir(parents=True, exist_ok=True)
-        base = Path(infile).stem.upper() + ".PBAS"
-        outfile = str(Path(outfile) / base)
-
-    outfile = _resolve_outfile(infile, outfile, yes, dry_run, verbose)
-
-    if verbose:
-        click.echo(f"[collapse] {infile} -> {outfile}", err=True)
-
-    src = read(infile)
-    out = collapser.run(src)
-
-    if dry_run:
-        for line in out:
-            click.echo(line)
-    else:
-        Path(outfile).parent.mkdir(parents=True, exist_ok=True)
-        write(outfile, out)
-        click.echo(f"Collapsed {infile} -> {outfile}")
+if __name__ == "__main__":
+    cli()
