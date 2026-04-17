@@ -12,12 +12,16 @@ Everything becomes a flat instruction stream.
 
 import re
 from dataclasses import dataclass
-from typing import List, Optional, Dict
+from typing import List, Dict
 
 DEFAULT_STEP = 10
 DEFAULT_BLOCK_STEP = 100
 
 
+@dataclass
+class CompilerConfig:
+    step: int = DEFAULT_STEP
+    block_step: int = DEFAULT_BLOCK_STEP
 
 
 # =============================================================================
@@ -86,9 +90,22 @@ def lex(line: str) -> List[Token]:
             i = j
             continue
 
-        # NUMBER
+        # NUMBER (integer or decimal)
         if c.isdigit():
             j = i
+            while j < len(line) and line[j].isdigit():
+                j += 1
+            if j < len(line) and line[j] == ".":
+                j += 1
+                while j < len(line) and line[j].isdigit():
+                    j += 1
+            tokens.append(Token("NUM", line[i:j]))
+            i = j
+            continue
+
+        # LEADING-DOT FLOAT (.5, .25, etc.)
+        if c == "." and i + 1 < len(line) and line[i + 1].isdigit():
+            j = i + 1
             while j < len(line) and line[j].isdigit():
                 j += 1
             tokens.append(Token("NUM", line[i:j]))
@@ -125,230 +142,266 @@ def lex(line: str) -> List[Token]:
             i += 3
             continue
 
+        # COMPOUND OPERATORS: <>, <=, >=
+        if c in ("<", ">") and i + 1 < len(line) and line[i + 1] in ("=", "<", ">"):
+            op = line[i:i + 2]
+            if op in ("<>", "<=", ">="):
+                tokens.append(Token("SYM", op))
+                i += 2
+                continue
+
         tokens.append(Token("SYM", c))
         i += 1
 
     return tokens
 
 
+def strip_comment(line: str) -> tuple[str, str | None]:
+    """
+    Split a source line into (code, comment) respecting string literals.
+    A "'" inside a double-quoted string is not treated as a comment delimiter.
+    Returns (code_part, comment_or_None).
+    """
+    i = 0
+    while i < len(line):
+        c = line[i]
+        if c == '"':
+            i += 1
+            while i < len(line) and line[i] != '"':
+                i += 1
+            i += 1  # step past closing quote (or end of line if unterminated)
+            continue
+        if c == "'":
+            return line[:i], line[i:]
+        i += 1
+    return line, None
+
+
 # =============================================================================
-# INSTRUCTION MODEL (NEW CORE)
+# INSTRUCTION MODEL
 # =============================================================================
 
 @dataclass
-class Instruction:
-    kind: str        # CODE | COMMENT | LABEL | EMPTY
-    addr: Optional[int]
-    text: str
+class LabelInstr:
     line: int
-    tokens: Optional[List[Token]] = None
+    name: str
+    addr: int | None = None
+
+
+@dataclass
+class CodeInstr:
+    line: int
+    text: str
+    tokens: List[Token]
+    substitutions: List[tuple[int, str]] | None = None
+    addr: int | None = None
+
+
+@dataclass
+class CommentInstr:
+    line: int
+    text: str
+    addr: int | None = None
+
+
+@dataclass
+class EmptyInstr:
+    line: int
+
+
+Instruction = LabelInstr | CodeInstr | CommentInstr | EmptyInstr
 
 
 # =============================================================================
-# COMPILER
+# EMIT HELPERS
 # =============================================================================
 
-class Compiler:
-    def __init__(self, step=DEFAULT_STEP, block_step=DEFAULT_BLOCK_STEP):
-        self.step = step
-        self.block_step = block_step
+def _needs_space(left: Token, right: Token) -> bool:
+    """
+    Return True if a space should be emitted between left and right.
 
-    # ------------------------------------------------------------
-    # PARSE INTO FLAT INSTRUCTION STREAM
-    # ------------------------------------------------------------
-    def build_instructions(self, lines: List[str]) -> List[Instruction]:
-        instrs = []
+    Opinionated GW-BASIC style:
+    - ),  ,  ;  :   always glue to the left (no space before them)
+    - (             glues to callable names — SIN(X), A(I), FNA(X), TAB(X)
+                    but keeps a space after statement keywords — PRINT (X)
+    - after (       nothing gets a leading space
+    """
+    gwbasic_callable_keywords = {
+        "TAB", "SPC", "USR",
+    }
 
-        for line_no, raw in enumerate(lines, start=1):
-            code = raw
-            comment = None
+    def can_call_without_space(token: Token) -> bool:
+        if token.kind == "ID":
+            return True
+        if token.kind == "KW" and token.value in gwbasic_callable_keywords:
+            return True
+        return False
 
-            if "'" in raw:
-                i = raw.index("'")
-                code = raw[:i]
-                comment = raw[i:]
+    if right.value in {")", ",", ";", ":"}:
+        return False
+    if right.value == "(":
+        return not can_call_without_space(left)
+    if left.value == "(":
+        return False
+    return True
 
-            # LABEL
-            m = re.match(r"^\s*([A-Za-z_]\w*)\s*:\s*(.*)$", code)
-            if m:
-                label = m.group(1).upper()
 
-                instrs.append(Instruction(
-                    kind="LABEL",
-                    addr=None,
-                    text=label,
-                    line=line_no
-                ))
+# =============================================================================
+# PIPELINE
+# =============================================================================
 
-                rest = m.group(2).strip()
-                if rest:
-                    instrs.append(Instruction(
-                        kind="CODE",
-                        addr=None,
-                        text=rest,
-                        tokens=lex(rest),
-                        line=line_no
-                    ))
+def build_instructions(lines: List[str]) -> List[Instruction]:
+    instrs: List[Instruction] = []
 
-                continue
+    for line_no, raw in enumerate(lines, start=1):
+        code, comment = strip_comment(raw)
 
-            # COMMENT ONLY LINE
-            if code.strip() == "" and comment:
-                instrs.append(Instruction(
-                    kind="COMMENT",
-                    addr=None,
-                    text=comment,
-                    line=line_no
-                ))
-                continue
+        # LABEL
+        m = re.match(r"^\s*([A-Za-z_]\w*)\s*:\s*(.*)$", code)
+        if m:
+            label = m.group(1).upper()
+            instrs.append(LabelInstr(line=line_no, name=label))
 
-            # EMPTY LINE
-            if code.strip() == "":
-                instrs.append(Instruction(
-                    kind="EMPTY",
-                    addr=None,
-                    text="",
-                    line=line_no
-                ))
-                continue
+            rest = m.group(2).strip()
+            if rest:
+                instrs.append(CodeInstr(line=line_no, text=rest, tokens=lex(rest)))
 
-            instrs.append(Instruction(
-                kind="CODE",
-                addr=None,
-                text=code,
-                tokens=lex(code),
-                line=line_no
-            ))
+            continue
 
-        return instrs
+        # COMMENT ONLY LINE
+        if code.strip() == "" and comment:
+            instrs.append(CommentInstr(line=line_no, text=comment))
+            continue
 
-    # ------------------------------------------------------------
-    # ADDRESS ASSIGNMENT (SIMPLE + SAFE)
-    # ------------------------------------------------------------
-    def assign_addresses(self, instrs: List[Instruction]):
-        addr = self.step
-        labels = {}
+        # EMPTY LINE
+        if code.strip() == "":
+            instrs.append(EmptyInstr(line=line_no))
+            continue
 
-        for i in instrs:
+        instrs.append(CodeInstr(line=line_no, text=code, tokens=lex(code)))
 
-            if i.kind == "LABEL":
-                if addr % self.block_step:
-                    addr = (addr // self.block_step + 1) * self.block_step
+    return instrs
 
-                labels[i.text] = addr
-                i.addr = addr
-                addr += self.step
-                continue
 
-            if i.kind == "EMPTY":
-                i.addr = None
-                continue
+def assign_addresses(instrs: List[Instruction], cfg: CompilerConfig) -> Dict[str, int]:
+    addr = cfg.step
+    labels = {}
 
-            # COMMENT + CODE both consume space
+    for i in instrs:
+
+        if isinstance(i, LabelInstr):
+            if addr % cfg.block_step:
+                addr = (addr // cfg.block_step + 1) * cfg.block_step
+
+            labels[i.name] = addr
             i.addr = addr
-            addr += self.step
+            addr += cfg.step
+            continue
 
-        return labels
+        if isinstance(i, EmptyInstr):
+            continue
 
-    # ------------------------------------------------------------
-    # RESOLVE LABELS IN TOKENS
-    # ------------------------------------------------------------
-    def resolve(self, instrs: List[Instruction], labels: Dict[str, int], errors: ErrorCollector, filename: str):
-        for i in instrs:
-            if i.kind != "CODE":
-                continue
+        # CommentInstr and CodeInstr both consume address space
+        i.addr = addr
+        addr += cfg.step
 
-            if not i.tokens:
-                i.tokens = lex(i.text)
+    return labels
 
-            new = []
-            j = 0
 
-            while j < len(i.tokens):
-                t = i.tokens[j]
+def resolve(instrs: List[Instruction], labels: Dict[str, int], errors: ErrorCollector, filename: str):
+    for i in instrs:
+        if not isinstance(i, CodeInstr):
+            continue
 
-                if t.kind == "KW" and t.value in {"GOTO", "GOSUB", "THEN", "ELSE"}:
-                    new.append(t)
+        new = []
+        substitutions: List[tuple[int, str]] = []
+        j = 0
 
-                    if j + 1 < len(i.tokens) and i.tokens[j+1].kind == "ID":
-                        label = i.tokens[j+1].value
-                        if label in labels:
-                            new.append(Token("NUM", str(labels[label])))
-                        else:
-                            errors.add(CompilerError(
-                                file=filename,
-                                line=i.line,
-                                col=1,
-                                message=f"Undefined label: {label}",
-                                source=i.text,
-                            ))
-                            new.append(i.tokens[j+1])
-                        j += 2
-                        continue
+        while j < len(i.tokens):
+            t = i.tokens[j]
 
+            if t.kind == "KW" and t.value in {"GOTO", "GOSUB", "THEN", "ELSE"}:
                 new.append(t)
-                j += 1
 
-            i.tokens = new
+                if j + 1 < len(i.tokens) and i.tokens[j+1].kind == "ID":
+                    label = i.tokens[j+1].value
+                    if label in labels:
+                        addr = labels[label]
+                        new.append(Token("NUM", str(addr)))
+                        substitutions.append((addr, label))
+                    else:
+                        errors.add(CompilerError(
+                            file=filename,
+                            line=i.line,
+                            col=1,
+                            message=f"Undefined label: {label}",
+                            source=i.text,
+                        ))
+                        new.append(i.tokens[j+1])
+                    j += 2
+                    continue
 
-    # ------------------------------------------------------------
-    # EMITTER
-    # ------------------------------------------------------------
-    def emit_tokens(self, tokens: List[Token]) -> str:
-        out = []
+            new.append(t)
+            j += 1
 
-        def space():
-            if out and out[-1] not in {" ", "(", ""}:
-                out.append(" ")
+        i.tokens = new
+        i.substitutions = substitutions
 
-        for t in tokens:
-            if t.kind == "STR":
-                space()
-                out.append(t.value)
-                continue
 
-            v = t.value
+def emit_substitution_comment(substitutions: List[tuple[int, str]] | None) -> str:
+    if not substitutions:
+        return ""
 
-            if v in {")", ",", ";"}:
-                out.append(v)
-                continue
+    if len(substitutions) == 1:
+        _, label = substitutions[0]
+        return f" ' -> [{label}]"
 
-            if v == "(":
-                out.append(v)
-                continue
+    rendered = ", ".join(
+        f"{addr} -> [{label}]"
+        for addr, label in substitutions
+    )
+    return f" ' {rendered}"
 
-            space()
-            out.append(v)
 
-        return "".join(out).strip()
+def emit_tokens(tokens: List[Token]) -> str:
+    parts = []
+    prev: Token | None = None
 
-    # ------------------------------------------------------------
-    # RUN
-    # ------------------------------------------------------------
-    def run(self, lines, filename):
-        instrs = self.build_instructions(lines)
-        labels = self.assign_addresses(instrs)
-        errors = ErrorCollector()
-        self.resolve(instrs, labels, errors, filename)
+    for t in tokens:
+        if prev is not None and _needs_space(prev, t):
+            parts.append(" ")
+        parts.append(t.value)
+        prev = t
 
-        out = []
+    return "".join(parts)
 
-        for i in instrs:
 
-            if i.kind == "EMPTY":
-                out.append("")
-                continue
+def run(lines: List[str], filename: str, cfg: CompilerConfig) -> tuple[list[str], ErrorCollector]:
+    instrs = build_instructions(lines)
+    labels = assign_addresses(instrs, cfg)
+    errors = ErrorCollector()
+    resolve(instrs, labels, errors, filename)
 
-            if i.kind == "LABEL":
-                out.append(f"{i.addr} ' [{i.text}]")
-                continue
+    out = []
 
-            if i.kind == "COMMENT":
-                out.append(f"{i.addr} {i.text}")
-                continue
+    for i in instrs:
 
-            if i.kind == "CODE":
-                code = self.emit_tokens(i.tokens or [])
-                out.append(f"{i.addr} {code}")
+        if isinstance(i, EmptyInstr):
+            out.append("")
+            continue
 
-        return out, ErrorCollector()
+        if isinstance(i, LabelInstr):
+            out.append(f"{i.addr} ' [{i.name}]")
+            continue
+
+        if isinstance(i, CommentInstr):
+            out.append(f"{i.addr} {i.text}")
+            continue
+
+        if isinstance(i, CodeInstr):
+            out.append(
+                f"{i.addr} {emit_tokens(i.tokens)}"
+                f"{emit_substitution_comment(i.substitutions)}"
+            )
+
+    return out, errors

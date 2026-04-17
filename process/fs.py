@@ -30,6 +30,8 @@ def write(path, lines):
 def dos_name(path: str|Path) -> str:
     """
     Emulate DOS-style uppercase filenames.
+    Only the basename is uppercased; directory components are left as-is,
+    since GW-BASIC workflows only care about the filename itself.
     (used for compatibility with GW-BASIC workflows)
     """
     dir_, base = os.path.split(path)
@@ -40,15 +42,18 @@ def find_existing_ci(path: str):
     """
     Case-insensitive file lookup in directory.
     Returns actual file path if found, else None.
+    Raises FileNotFoundError if the containing directory does not exist.
     """
     dir_ = os.path.dirname(path) or "."
     target = os.path.basename(path).upper()
 
     try:
-        for e in os.listdir(dir_):
-            if e.upper() == target:
-                return os.path.join(dir_, e)
+        entries = os.listdir(dir_)
     except FileNotFoundError:
-        return None
+        raise FileNotFoundError(f"Directory not found: {dir_}")
+
+    for e in entries:
+        if e.upper() == target:
+            return os.path.join(dir_, e)
 
     return None

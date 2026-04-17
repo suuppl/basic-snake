@@ -48,7 +48,7 @@ jobs:
       - name: Build .BAS files
         run: |
           mkdir -p build
-          python process.py -y ./src ./build
+          python process.py ./src ./build
 
       - name: Create archives
         run: |

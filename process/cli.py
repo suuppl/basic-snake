@@ -7,10 +7,11 @@ import click
 from pathlib import Path
 
 from .core import (
-    Compiler,
+    CompilerConfig,
     DEFAULT_STEP,
     DEFAULT_BLOCK_STEP,
     ErrorCollector,
+    run,
 )
 
 from .fs import (
@@ -39,7 +40,10 @@ def collect_files(root, ext):
 
 
 def resolve_infile(path):
-    found = find_existing_ci(path)
+    try:
+        found = find_existing_ci(path)
+    except FileNotFoundError as e:
+        raise click.ClickException(str(e))
     if not found:
         raise click.ClickException(f"File not found: {path}")
     return os.path.normpath(found)
@@ -56,7 +60,7 @@ def map_outfile(in_root, infile, out_root, new_ext):
 # =============================================================================
 
 def print_errors(errors: ErrorCollector):
-    if not errors or not errors.errors:
+    if not errors:
         return
 
     for err in errors.errors:
@@ -67,23 +71,26 @@ def print_errors(errors: ErrorCollector):
 # PIPELINE
 # =============================================================================
 
-def run_batch(files, in_root, out_root, compiler, dry, verbose):
+def run_batch(files, in_root, out_root, cfg, ctx, dry, verbose):
+    in_root = Path(in_root).resolve()
     out_root = Path(out_root)
 
     if not dry:
         out_root.mkdir(parents=True, exist_ok=True)
 
     for f in files:
+        f = f.resolve()
+
         if verbose:
             click.echo(f"[expand] {f}", err=True)
 
         src = read(f)
-        out, errors = compiler.run(src, str(f))
+        out, errors = run(src, str(f), cfg)
 
         # MULTI ERROR HANDLING
-        if errors and errors.errors:
+        if errors:
             print_errors(errors)
-            raise SystemExit(1)
+            ctx.exit(1)
 
         dst = map_outfile(in_root, f, out_root, ".bas")
 
@@ -95,16 +102,16 @@ def run_batch(files, in_root, out_root, compiler, dry, verbose):
             write(dst, out)
 
 
-def run_single(infile, outfile, compiler, dry, verbose):
+def run_single(infile, outfile, cfg, ctx, dry, verbose):
     infile = resolve_infile(infile)
     src = read(infile)
 
-    out, errors = compiler.run(src, infile)
+    out, errors = run(src, infile, cfg)
 
     # MULTI ERROR HANDLING
-    if errors and errors.errors:
+    if errors:
         print_errors(errors)
-        raise SystemExit(1)
+        ctx.exit(1)
 
     if outfile is None:
         outfile = dos_name(Path(infile).with_suffix(".bas"))
@@ -130,13 +137,14 @@ def run_single(infile, outfile, compiler, dry, verbose):
 # =============================================================================
 
 @click.command(context_settings=dict(help_option_names=["-h", "--help"]))
+@click.pass_context
 @click.argument("infile")
 @click.argument("outfile", required=False)
 @click.option("-n", "--dry-run", is_flag=True)
 @click.option("-v", "--verbose", is_flag=True)
 @click.option("--step", default=DEFAULT_STEP)
 @click.option("--block-step", default=DEFAULT_BLOCK_STEP)
-def cli(infile, outfile, dry_run, verbose, step, block_step):
+def cli(ctx, infile, outfile, dry_run, verbose, step, block_step):
     """
     GW-BASIC label tool
 
@@ -145,7 +153,7 @@ def cli(infile, outfile, dry_run, verbose, step, block_step):
         ./process.py ./src ./build
     """
 
-    compiler = Compiler(step, block_step)
+    cfg = CompilerConfig(step, block_step)
 
     # DIRECTORY MODE
     if is_dir_mode(infile):
@@ -153,11 +161,16 @@ def cli(infile, outfile, dry_run, verbose, step, block_step):
             raise click.ClickException("Output directory required for batch mode")
 
         files = collect_files(infile, ".pbas")
-        run_batch(files, infile, outfile, compiler, dry_run, verbose)
+
+        if not files:
+            click.echo(f"Warning: no .pbas files found in {infile}", err=True)
+            return
+
+        run_batch(files, infile, outfile, cfg, ctx, dry_run, verbose)
         return
 
     # SINGLE FILE MODE
-    run_single(infile, outfile, compiler, dry_run, verbose)
+    run_single(infile, outfile, cfg, ctx, dry_run, verbose)
 
 
 if __name__ == "__main__":
