@@ -62,6 +62,24 @@ KEYWORDS = {
     "RETURN", "DEFINT", "DEF", "USING", "CLS"
 }
 
+TYPE_SIGILS = "$%&!#"
+
+BUILTIN_LABEL_NAMES = KEYWORDS | {
+    "BEEP", "CLEAR", "CLOSE", "COLOR", "DATA", "DEFDBL", "DEFSNG",
+    "DEFSTR", "DELETE", "DRAW", "EDIT", "ERASE", "FIELD", "FILES",
+    "GET", "IF", "INPUT", "KEY", "KILL", "LET", "LINE", "LIST",
+    "LOAD", "LOCATE", "LPRINT", "LSET", "MERGE", "NAME", "NEW",
+    "OFF", "ON", "OPEN", "OPTION", "OUT", "PAINT", "POKE", "PRESET",
+    "PSET", "PUT", "RANDOMIZE", "READ", "REM", "RESET", "RESTORE",
+    "RESUME", "RSET", "RUN", "SCREEN", "SOUND", "STEP", "STOP",
+    "SWAP", "SYSTEM", "TAB", "TROFF", "TRON", "USR", "VIEW", "WAIT",
+    "WEND", "WHILE", "WIDTH", "WINDOW", "WRITE",
+    "ABS", "ASC", "ATN", "CDBL", "CINT", "COS", "CSNG", "EXP", "FIX",
+    "HEX", "INP", "INSTR", "INT", "LEN", "LOG", "MID", "PEEK", "POINT",
+    "POS", "RND", "SGN", "SIN", "SPC", "SQR", "STR", "STRING", "TAN",
+    "TIMER", "VAL",
+}
+
 
 @dataclass
 class Token:
@@ -116,8 +134,11 @@ def lex(line: str) -> List[Token]:
         if c.isalpha() or c == "_":
             j = i
             while j < len(line) and (
-                line[j].isalnum() or line[j] in "_$."
+                line[j].isalnum() or line[j] in "_."
             ):
+                j += 1
+
+            if j < len(line) and line[j] in TYPE_SIGILS:
                 j += 1
 
             word = line[i:j]
@@ -283,6 +304,21 @@ def build_instructions(lines: List[str]) -> List[Instruction]:
     return instrs
 
 
+def validate_labels(instrs: List[Instruction], lines: List[str], errors: ErrorCollector, filename: str):
+    for instr in instrs:
+        if not isinstance(instr, LabelInstr):
+            continue
+
+        if instr.name in BUILTIN_LABEL_NAMES:
+            errors.add(CompilerError(
+                file=filename,
+                line=instr.line,
+                col=1,
+                message=f"Label conflicts with GW-BASIC built-in: {instr.name}",
+                source=lines[instr.line - 1],
+            ))
+
+
 def assign_addresses(instrs: List[Instruction], cfg: CompilerConfig) -> Dict[str, int]:
     addr = cfg.step
     labels = {}
@@ -320,11 +356,15 @@ def resolve(instrs: List[Instruction], labels: Dict[str, int], errors: ErrorColl
         while j < len(i.tokens):
             t = i.tokens[j]
 
-            if t.kind == "KW" and t.value in {"GOTO", "GOSUB", "THEN", "ELSE"}:
+            # ---------------------------------------------------------
+            # GOTO / GOSUB → ALWAYS expect label
+            # ---------------------------------------------------------
+            if t.kind == "KW" and t.value in {"GOTO", "GOSUB"}:
                 new.append(t)
 
                 if j + 1 < len(i.tokens) and i.tokens[j+1].kind == "ID":
                     label = i.tokens[j+1].value
+
                     if label in labels:
                         addr = labels[label]
                         new.append(Token("NUM", str(addr)))
@@ -338,9 +378,72 @@ def resolve(instrs: List[Instruction], labels: Dict[str, int], errors: ErrorColl
                             source=i.text,
                         ))
                         new.append(i.tokens[j+1])
+
                     j += 2
                     continue
 
+                j += 1
+                continue
+
+            # ---------------------------------------------------------
+            # THEN / ELSE → detect label vs statement
+            # ---------------------------------------------------------
+            if t.kind == "KW" and t.value in {"THEN", "ELSE"}:
+                new.append(t)
+
+                if j + 1 < len(i.tokens):
+                    nxt = i.tokens[j+1]
+
+                    # Case 1: numeric line → keep
+                    if nxt.kind == "NUM":
+                        new.append(nxt)
+                        j += 2
+                        continue
+
+                    # Case 2: identifier → MAY be label
+                    if nxt.kind == "ID":
+                        is_label = False
+
+                        # lookahead token
+                        if j + 2 >= len(i.tokens):
+                            is_label = True  # end of line
+                        else:
+                            nxt2 = i.tokens[j+2]
+
+                            # only ":" means it's a label jump
+                            if nxt2.value == ":":
+                                is_label = True
+
+                        if is_label:
+                            label = nxt.value
+
+                            if label in labels:
+                                addr = labels[label]
+                                new.append(Token("NUM", str(addr)))
+                                substitutions.append((addr, label))
+                            else:
+                                errors.add(CompilerError(
+                                    file=filename,
+                                    line=i.line,
+                                    col=1,
+                                    message=f"Undefined label: {label}",
+                                    source=i.text,
+                                ))
+                                new.append(nxt)
+
+                            j += 2
+                            continue
+
+                        # otherwise: it's a statement → DO NOT consume
+                        j += 1
+                        continue
+
+                j += 1
+                continue
+
+            # ---------------------------------------------------------
+            # default
+            # ---------------------------------------------------------
             new.append(t)
             j += 1
 
@@ -378,8 +481,9 @@ def emit_tokens(tokens: List[Token]) -> str:
 
 def run(lines: List[str], filename: str, cfg: CompilerConfig) -> tuple[list[str], ErrorCollector]:
     instrs = build_instructions(lines)
-    labels = assign_addresses(instrs, cfg)
     errors = ErrorCollector()
+    validate_labels(instrs, lines, errors, filename)
+    labels = assign_addresses(instrs, cfg)
     resolve(instrs, labels, errors, filename)
 
     out = []
